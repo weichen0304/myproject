@@ -1,264 +1,430 @@
 import sys
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout,
-    QCalendarWidget, QLabel, QPushButton,
-    QGroupBox, QTimeEdit, QMessageBox,
-    QSplitter, QInputDialog
-)
-from PyQt6.QtCore import (
-    QDate, Qt, QLocale, 
-    QTimer, QTime, QDateTime
-)
-from PyQt6.QtGui import QFont, QColor
+import sqlite3
+# 匯出 .ics 需要的函式庫
+from ics import Calendar, Event
+from datetime import datetime
+# 時區功能需要的函式庫
+try:
+    import pytz
+except ImportError:
+    print("錯誤：缺少 'pytz' 函式庫。")
+    print("請在終端機執行: python.exe -m pip install pytz")
+    sys.exit()
 
-class ScheduleCalendarApp(QMainWindow):
-    """
-    行事曆與課表查詢系統主視窗
-    包含日曆、事件、鬧鐘功能、可調整版面及按鈕互動。
-    """
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QCalendarWidget, QListWidget, QDialog, QLabel, QLineEdit,
+    QTextEdit, QTimeEdit, QComboBox, QSpinBox, QTableWidget,
+    QTableWidgetItem, QMessageBox,
+    QCheckBox,  # 鬧鐘功能需要
+    QFileDialog # 匯出 .ics 功能需要
+)
+from PyQt6.QtCore import QDate, QTimer, QDateTime, QTime, Qt
+
+DB = "calendar_schedule.db"
+
+def init_db():
+    """初始化資料庫 (無變動)"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT, date TEXT, start_time TEXT, end_time TEXT, description TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS courses(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_name TEXT, teacher TEXT, classroom TEXT,
+        weekday INTEGER, start_period INTEGER, end_period INTEGER
+    )''')
+
+    try:
+        c.execute("SELECT set_alarm, alarm_triggered FROM events LIMIT 1")
+    except sqlite3.OperationalError:
+        print("為 'events' 表新增鬧鐘欄位...")
+        c.execute("ALTER TABLE events ADD COLUMN set_alarm INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE events ADD COLUMN alarm_triggered INTEGER DEFAULT 0")
+
+    conn.commit()
+    conn.close()
+
+
+# ---------------- 新增事件對話框 (v5 版, 已修正) ----------------
+class AddEventDialog(QDialog):
+    def __init__(self, date):
+        super().__init__()
+        self.setWindowTitle(f"新增事件 - {date}")
+        self.date = date
+        self.title_edit = QLineEdit()
+        self.start_time = QTimeEdit()
+        self.end_time = QTimeEdit()
+        self.desc_edit = QTextEdit()
+        self.alarm_check = QCheckBox("⏰ 設定鬧鐘提醒")
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("事件標題："))
+        layout.addWidget(self.title_edit)
+        layout.addWidget(QLabel("開始時間："))
+        layout.addWidget(self.start_time)
+        layout.addWidget(QLabel("結束時間："))
+        layout.addWidget(self.end_time)
+        layout.addWidget(QLabel("描述："))
+        layout.addWidget(self.desc_edit)
+        layout.addWidget(self.alarm_check)
+        save_btn = QPushButton("儲存")
+        save_btn.clicked.connect(self.save_event)
+        layout.addWidget(save_btn)
+        self.setLayout(layout)
+
+    def save_event(self):
+        """[已修正] 儲存時間強制使用 "HH:mm:ss" 標準格式"""
+        title = self.title_edit.text().strip()
+        if not title:
+            QMessageBox.warning(self, "錯誤", "請輸入事件標題!")
+            return
+        
+        set_alarm = 1 if self.alarm_check.isChecked() else 0
+        start_time_str = self.start_time.time().toString("HH:mm:ss")
+        end_time_str = self.end_time.time().toString("HH:mm:ss")
+
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute('''INSERT INTO events(title, date, start_time, end_time, description, set_alarm)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                  (title, self.date, start_time_str, end_time_str,
+                   self.desc_edit.toPlainText(), set_alarm))
+        conn.commit()
+        conn.close()
+        self.accept()
+
+
+# ---------------- 新增課程對話框 (無變動) ----------------
+class AddCourseDialog(QDialog):
     def __init__(self):
         super().__init__()
-        
-        # --- 應用程式狀態 (資料儲存) ---
-        self.alarms = [] # 儲存鬧鐘列表: [(QDate, QTime, description), ...]
-        self.events = {} # 使用字典儲存事件 {QDate: [(名稱, 描述), ...], ...}
-        
-        # 視窗設定
-        self.setWindowTitle("行事曆與課表查詢系統 (PyQt6)")
-        self.setGeometry(100, 100, 850, 600)
-        
-        # 設置主中央 Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        self.setWindowTitle("新增課程")
+        self.resize(300, 250)
+        self.name_edit = QLineEdit()
+        self.teacher_edit = QLineEdit()
+        self.room_edit = QLineEdit()
+        self.weekday_box = QComboBox()
+        self.weekday_box.addItems(["週一", "週二", "週三", "週四", "週五"])
+        self.start_period = QSpinBox()
+        self.start_period.setRange(1, 10)
+        self.end_period = QSpinBox()
+        self.end_period.setRange(1, 10)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("課程名稱："))
+        layout.addWidget(self.name_edit)
+        layout.addWidget(QLabel("教師："))
+        layout.addWidget(self.teacher_edit)
+        layout.addWidget(QLabel("教室："))
+        layout.addWidget(self.room_edit)
+        layout.addWidget(QLabel("星期："))
+        layout.addWidget(self.weekday_box)
+        layout.addWidget(QLabel("節次（起-迄）："))
+        layout.addWidget(self.start_period)
+        layout.addWidget(self.end_period)
+        save_btn = QPushButton("儲存")
+        save_btn.clicked.connect(self.save_course)
+        layout.addWidget(save_btn)
+        self.setLayout(layout)
 
-        # --- 1. 創建左側日曆容器 ---
-        self.left_widget = QWidget()
-        calendar_container = QVBoxLayout(self.left_widget)
-        
-        # 日曆控件初始化
-        self.calendar = QCalendarWidget(self.left_widget)
-        self.calendar.setLocale(QLocale(QLocale.Language.Chinese, QLocale.Country.Taiwan))
-        self.calendar.setGridVisible(True)
-        self.calendar.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-        self.calendar.setCurrentPage(2025, 11) 
-        self.calendar.setStyleSheet(self._get_calendar_stylesheet())
-        self.calendar.clicked.connect(self.update_event_display)
-        
-        calendar_container.addWidget(self.calendar)
-        
-        # --- 2. 創建右側事件/鬧鐘容器 ---
-        self.right_widget = QWidget()
-        right_vbox = QVBoxLayout(self.right_widget)
-        
-        # 2a. 鬧鐘設定區
-        alarm_group = QGroupBox("設定鬧鐘")
-        alarm_layout = QHBoxLayout(alarm_group)
-        
-        self.time_input = QTimeEdit()
-        self.time_input.setDisplayFormat("HH:mm") 
-        self.time_input.setMinimumHeight(30)
-        
-        btn_set_alarm = QPushButton("設定鬧鐘")
-        btn_set_alarm.setMinimumHeight(30)
-        btn_set_alarm.clicked.connect(self.set_alarm) 
-        
-        alarm_layout.addWidget(self.time_input)
-        alarm_layout.addWidget(btn_set_alarm)
-        right_vbox.addWidget(alarm_group)
-        
-        # 2b. 今日課表/事件 顯示區
-        current_date_str = QDate.currentDate().toString("yyyy年M月d日")
-        self.event_group = QGroupBox(f"{current_date_str} 課表")
-        self.event_group.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
-        
-        event_layout = QVBoxLayout(self.event_group)
-        self.event_label = QLabel("今日事件：\n無事件")
-        self.event_label.setFont(QFont("Microsoft YaHei", 10))
-        self.event_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        
-        event_layout.addWidget(self.event_label)
-        right_vbox.addWidget(self.event_group)
-        
-        # 2c. 底部按鈕區
-        right_vbox.addStretch(1) # 推擠按鈕到底部
-        button_hbox = QHBoxLayout()
-        
-        btn_add_event = QPushButton("新增事件")
-        btn_add_class = QPushButton("新增課程")
-        btn_view_schedule = QPushButton("查詢課表")
-        
-        btn_add_event.setMinimumHeight(35)
-        btn_add_class.setMinimumHeight(35)
-        btn_view_schedule.setMinimumHeight(35)
-
-        # *** 連接按鈕事件到方法 (此版本：事件和課程連接到終端機輸出，排除彈窗問題) ***
-        btn_add_event.clicked.connect(self.add_event_clicked) 
-        btn_add_class.clicked.connect(self.add_class_clicked) 
-        btn_view_schedule.clicked.connect(self.view_schedule_clicked)
-        # **************************************************************************
-        
-        button_hbox.addWidget(btn_add_event)
-        button_hbox.addWidget(btn_add_class)
-        button_hbox.addWidget(btn_view_schedule)
-        right_vbox.addLayout(button_hbox)
-
-        # --- 3. 使用 QSplitter 整合實現版面調整 ---
-        self.splitter = QSplitter(Qt.Orientation.Horizontal) # 水平分割
-        self.splitter.addWidget(self.left_widget)
-        self.splitter.addWidget(self.right_widget)
-        self.splitter.setSizes([550, 300]) 
-
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.addWidget(self.splitter)
-        
-        # --- 4. 啟動 QTimer 鬧鐘檢查器 ---
-        self.update_event_display(QDate.currentDate()) 
-        
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.check_alarms)
-        self.timer.start(1000)
-
-    def _get_calendar_stylesheet(self):
-        """用於設定日曆的樣式表 (CSS)"""
-        return """
-            QCalendarWidget QAbstractItemView:enabled {
-                selection-background-color: #0078D7;
-                selection-color: white;
-            }
-            QCalendarWidget QAbstractItemView:enabled {
-                color: black;
-            }
-            #qt_calendar_navigationbar {
-                background-color: #0078D7;
-                color: white;
-            }
-            #qt_calendar_prevmonth, #qt_calendar_nextmonth, 
-            #qt_calendar_monthbutton, #qt_calendar_yearbutton {
-                color: white;
-            }
-        """
-
-    # --- 關鍵修正：將新增事件和課程改為終端機輸出 ---
-    def add_event_clicked(self):
-        """處理「新增事件」：檢查連接並彈出輸入框"""
-        print("--- 新增事件按鈕被點擊！(檢查連接成功) ---")
-        
-        selected_date = self.calendar.selectedDate()
-        event_name, ok = QInputDialog.getText(
-            self, 
-            f"新增事件 - {selected_date.toString('yyyy年M月d日')}", 
-            "請輸入事件名稱："
-        )
-        
-        if ok and event_name:
-            description = ""
-            if selected_date not in self.events:
-                self.events[selected_date] = []
-            
-            self.events[selected_date].append((event_name, description))
-            self.update_event_display(selected_date)
-            
-            QMessageBox.information(
-                self, 
-                "事件已新增", 
-                f"已在 {selected_date.toString('yyyy/MM/dd')} 新增事件：{event_name}"
-            )
-        elif ok:
-             QMessageBox.warning(self, "輸入錯誤", "事件名稱不能為空。")
-
-    def add_class_clicked(self):
-        """處理「新增課程」：檢查連接 (終端機輸出)"""
-        print("--- 新增課程按鈕被點擊！(檢查連接成功) ---")
-        QMessageBox.information(self, "功能提示", "您點擊了「新增課程」。\n此功能通常需要使用 QDialog 進行多欄位輸入。")
-
-    def view_schedule_clicked(self):
-        """處理「查詢課表」按鈕點擊事件"""
-        print("--- 查詢課表按鈕被點擊！---")
-        QMessageBox.information(self, "功能提示", "您點擊了「查詢課表」。")
-    # -----------------------------------------------------
-
-    def update_event_display(self, date: QDate):
-        """根據選定的日期更新右側的事件/課表顯示。"""
-        date_str = date.toString("yyyy年M月d日") 
-        
-        events_on_day = self.events.get(date, [])
-        
-        if events_on_day:
-            event_lines = [f"- {name}" for name, desc in events_on_day]
-            event_text = "今日事件：\n" + "\n".join(event_lines)
-        elif date == QDate(2025, 11, 1):
-             event_text = "今日事件：\n- 軟體工程期中報告\n- 專題討論會 (下午)"
-        else:
-            event_text = "今日事件：\n無事件"
-
-        alarms_today = [
-            f"- 鬧鐘 {time.toString('HH:mm')} ({desc})" 
-            for date_obj, time, desc in self.alarms 
-            if date_obj == date
-        ]
-        
-        if alarms_today:
-            event_text += "\n\n當日鬧鐘：\n" + "\n".join(alarms_today)
-        
-        self.event_group.setTitle(f"{date_str} 課表")
-        self.event_label.setText(event_text)
-
-    def set_alarm(self):
-        """設定鬧鐘"""
-        selected_date = self.calendar.selectedDate()
-        selected_time = self.time_input.time()
-        
-        now = QDateTime.currentDateTime()
-        alarm_datetime = QDateTime(selected_date, selected_time)
-
-        if alarm_datetime <= now:
-            QMessageBox.warning(self, "設定錯誤", "請設定未來的時間作為鬧鐘。")
+    def save_course(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "錯誤", "請輸入課程名稱！")
             return
+        weekday = self.weekday_box.currentIndex() + 1
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute('''INSERT INTO courses(course_name, teacher, classroom, weekday, start_period, end_period)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                  (name, self.teacher_edit.text(), self.room_edit.text(), weekday,
+                   self.start_period.value(), self.end_period.value()))
+        conn.commit()
+        conn.close()
+        self.accept()
 
-        description = "設定的提醒事項" 
-        self.alarms.append((selected_date, selected_time, description))
+
+# ---------------- 主介面 (v5 版, 已加入刪除功能) ----------------
+class CalendarScheduleApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("行事曆與課表系統 (PyQt6)")
+        self.resize(850, 550)
+        self.calendar = QCalendarWidget()
+        self.calendar.selectionChanged.connect(self.show_events)
+        self.event_list = QListWidget()
+        self.add_event_btn = QPushButton("新增事件")
+        self.add_course_btn = QPushButton("新增課程")
+        self.view_schedule_btn = QPushButton("查看課表")
+        self.delete_event_btn = QPushButton("刪除事件") # [已新增]
+        self.export_btn = QPushButton("匯出日曆 (.ics)")
+        self.add_event_btn.clicked.connect(self.add_event)
+        self.add_course_btn.clicked.connect(self.add_course)
+        self.view_schedule_btn.clicked.connect(self.show_schedule)
+        self.delete_event_btn.clicked.connect(self.delete_event) # [已新增]
+        self.export_btn.clicked.connect(self.export_to_ics)
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.event_list)
+        btn_layout = QHBoxLayout()
+        btn_layout.addWidget(self.add_event_btn)
+        btn_layout.addWidget(self.delete_event_btn) # [已新增]
+        btn_layout.addWidget(self.add_course_btn)
+        btn_layout.addWidget(self.view_schedule_btn)
+        right_layout.addLayout(btn_layout)
+        right_layout.addWidget(self.export_btn) 
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.calendar, 2)
+        main_layout.addLayout(right_layout, 3)
+        self.setLayout(main_layout)
+        self.alarm_timer = QTimer(self)
+        self.alarm_timer.timeout.connect(self.check_alarms)
+        self.alarm_timer.start(30000)
+        self.show_events()
+        self.check_alarms()
+
+    def show_events(self):
+        """[已修改] 顯示事件時，儲存 'id' 以便刪除"""
+        date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        weekday = self.calendar.selectedDate().dayOfWeek()
+        self.event_list.clear()
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("SELECT course_name, classroom, start_period, end_period FROM courses WHERE weekday=?", (weekday,))
+        courses = c.fetchall()
+        if courses:
+            self.event_list.addItem("📚 今日課程：")
+            for course in courses:
+                self.event_list.addItem(f"{course[0]} @ {course[1]}（第{course[2]}~{course[3]}節）")
+        else:
+            self.event_list.addItem("📚 今日無課程")
+        self.event_list.addItem("────────────────────────")
+        self.event_list.addItem("🗓️ 今日事件：")
         
-        self.update_event_display(selected_date) 
-        
-        QMessageBox.information(
-            self, 
-            "鬧鐘已設定", 
-            f"鬧鐘已設定於:\n日期: {selected_date.toString('yyyy/MM/dd')}\n時間: {selected_time.toString('HH:mm')}"
+        # [修改] 查詢時多選 'id' 欄位
+        c.execute("SELECT id, title, start_time, end_time, set_alarm FROM events WHERE date=?", (date,))
+        events = c.fetchall()
+        if events:
+            for e in events:
+                # e[0] = id, e[1] = title, e[2] = start, e[3] = end, e[4] = alarm
+                alarm_icon = " ⏰" if e[4] == 1 else ""
+                display_text = f"{e[1]} ({e[2]}~{e[3]}){alarm_icon}"
+                item = QListWidgetItem(display_text)
+                # [關鍵] 將 'id' (e[0]) 儲存在這個 item 裡面
+                item.setData(Qt.ItemDataRole.UserRole, e[0])
+                self.event_list.addItem(item)
+        else:
+            self.event_list.addItem("無事件")
+        conn.close()
+
+    def add_event(self):
+        date = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        dialog = AddEventDialog(date)
+        if dialog.exec():
+            self.show_events()
+
+    def delete_event(self):
+        """[已新增] 刪除在 QListWidget 中當前選擇的事件"""
+        current_item = self.event_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "錯誤", "請先在列表中選擇一個要刪除的「事件」。")
+            return
+        event_id = current_item.data(Qt.ItemDataRole.UserRole)
+        if not event_id:
+            QMessageBox.warning(self, "錯誤", "您選擇的項目不是一個可刪除的事件。")
+            return
+            
+        reply = QMessageBox.question(
+            self, "確認刪除", f"您確定要刪除這個事件嗎？\n\n{current_item.text().strip()}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                conn = sqlite3.connect(DB)
+                c = conn.cursor()
+                c.execute("DELETE FROM events WHERE id = ?", (event_id,))
+                conn.commit()
+                conn.close()
+                self.show_events()
+            except Exception as e:
+                QMessageBox.critical(self, "資料庫錯誤", f"刪除失敗：\n{e}")
+
+    def add_course(self):
+        dialog = AddCourseDialog()
+        if dialog.exec():
+            self.show_events()
+
+    def show_schedule(self):
+        self.schedule_window = ScheduleWindow()
+        self.schedule_window.show()
 
     def check_alarms(self):
-        """每秒被 QTimer 呼叫，檢查是否有鬧鐘時間到達"""
-        now_date = QDate.currentDate()
-        now_time = QTime.currentTime()
-        current_minute = now_time.toString("HH:mm")
+        """鬧鐘檢查 (無變動)"""
+        print(f"檢查鬧鐘: {QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm:ss')}")
+        now = QDateTime.currentDateTime()
+        current_date_str = now.toString("yyyy-MM-dd")
+        current_time_str = now.toString("HH:mm")
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute('''SELECT id, title FROM events 
+                     WHERE date = ? AND start_time = ? AND 
+                     set_alarm = 1 AND alarm_triggered = 0''',
+                  (current_date_str, current_time_str))
+        alarms_to_trigger = c.fetchall()
+        if alarms_to_trigger:
+            for event_id, title in alarms_to_trigger:
+                print(f"觸發鬧鐘 (ID: {event_id}): {title}")
+                QMessageBox.information(self, "⏰ 鬧鐘提醒 ⏰", 
+                                        f"事件時間到了：\n\n** {title} **")
+                c.execute("UPDATE events SET alarm_triggered = 1 WHERE id = ?", (event_id,))
+            conn.commit()
+        conn.close()
 
-        triggered_alarms_indices = []
+    # --- [ *** 終極修正版 v6 *** ] ---
+    def export_to_ics(self):
+        """
+        匯出 .ics 檔案
+        (修正時區 + 修正 AM/PM 解析 + [修正] Android 的 UID 錯誤)
+        """
         
-        for i, (alarm_date, alarm_time, desc) in enumerate(self.alarms):
-            alarm_minute = alarm_time.toString("HH:mm")
+        try:
+            local_tz = pytz.timezone("Asia/Taipei")
+        except pytz.UnknownTimeZoneError:
+            QMessageBox.critical(self, "錯誤", "無法載入 'Asia/Taipei' 時區資訊。")
+            return
 
-            if alarm_date == now_date and alarm_minute == current_minute:
-                triggered_alarms_indices.append(i) 
+        # 1. 另存新檔
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "儲存 iCalendar 檔案", "MyEvents.ics", "iCalendar 檔案 (*.ics)"
+        )
+        if not save_path:
+            return
+
+        # 2. 讀取資料庫
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        # --- [v6 修正] --- 我們需要 'id' 來建立安全的 UID
+        c.execute("SELECT id, title, date, start_time, end_time, description FROM events")
+        db_events = c.fetchall()
+        conn.close()
+        
+        # 3. 建立 Calendar 物件
+        cal = Calendar()
+        parse_errors = 0 
+        
+        # --- [v6 修正] --- 新增 event_id 變數
+        for event_id, title, date, start_time, end_time, description in db_events:
+            dt_start, dt_end = None, None
+            try:
+                start_str_orig = f"{date} {start_time}"
+                end_str_orig = f"{date} {end_time}"
                 
-                QMessageBox.critical(
-                    self, 
-                    "🔔 鬧鐘響了！", 
-                    f"時間到：{current_minute}！\n提醒事項：{desc}"
-                )
-        
-        for index in sorted(triggered_alarms_indices, reverse=True):
-            del self.alarms[index]
+                dt_start_naive, dt_end_naive = None, None
+                
+                # (v5 修正) 處理 AM/PM 和 24小時制
+                if "上午" in start_str_orig or "下午" in start_str_orig:
+                    start_is_pm = "下午" in start_str_orig
+                    end_is_pm = "下午" in end_str_orig
+                    start_str_clean = start_str_orig.replace("上午", "").replace("下午", "").strip()
+                    end_str_clean = end_str_orig.replace("上午", "").replace("下午", "").strip()
+                    try:
+                        dt_start_naive = datetime.strptime(start_str_clean, "%Y-%m-%d %I:%M:%S")
+                        dt_end_naive = datetime.strptime(end_str_clean, "%Y-%m-%d %I:%M:%S")
+                    except ValueError:
+                        dt_start_naive = datetime.strptime(start_str_clean, "%Y-%m-%d %I:%M")
+                        dt_end_naive = datetime.strptime(end_str_clean, "%Y-%m-%d %I:%M")
+                    if start_is_pm and dt_start_naive.hour < 12: dt_start_naive = dt_start_naive.replace(hour=dt_start_naive.hour + 12)
+                    if end_is_pm and dt_end_naive.hour < 12: dt_end_naive = dt_end_naive.replace(hour=dt_end_naive.hour + 12)
+                    if not start_is_pm and dt_start_naive.hour == 12: dt_start_naive = dt_start_naive.replace(hour=0)
+                    if not end_is_pm and dt_end_naive.hour == 12: dt_end_naive = dt_end_naive.replace(hour=0)
+                else:
+                    try:
+                        dt_start_naive = datetime.strptime(start_str_orig, "%Y-%m-%d %H:%M:%S")
+                        dt_end_naive = datetime.strptime(end_str_orig, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        dt_start_naive = datetime.strptime(start_str_orig, "%Y-%m-%d %H:%M")
+                        dt_end_naive = datetime.strptime(end_str_orig, "%Y-%m-%d %H:%M")
+                
+                dt_start = local_tz.localize(dt_start_naive)
+                dt_end = local_tz.localize(dt_end_naive)
+                
+                if dt_end <= dt_start:
+                    print(f"跳過無效事件 (結束時間早於開始): {title}")
+                    parse_errors += 1
+                    continue
+
+                # 建立 Event 物件
+                e = Event()
+                e.name = title
+                e.begin = dt_start
+                e.end = dt_end
+                e.description = description
+                
+                # --- [v6 終極修正] ---
+                # 手動設定一個 "安全" 的 UID，Android 系統才不會拒絕
+                # 我們使用資料庫的 id 確保它是獨一無二的
+                e.uid = f"my-calendar-event-{event_id}@example.com"
+                # --- [修正完畢] ---
+
+                cal.events.add(e)
+                
+            except ValueError as ve:
+                parse_errors += 1
+                print(f"錯誤：無法解析日期/時間格式 {start_str_orig} - {ve}")
+            except Exception as ex:
+                parse_errors += 1
+                print(f"建立事件時發生未知錯誤: {ex}")
+
+        # 4. 寫入檔案 (無變動)
+        if not cal.events and parse_errors == 0:
+            QMessageBox.warning(self, "注意", "資料庫中沒有可匯出的事件。")
+            return
             
-        if triggered_alarms_indices and self.calendar.selectedDate() == now_date:
-            self.update_event_display(now_date)
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.writelines(cal.serialize_iter())
+            
+            if parse_errors > 0:
+                QMessageBox.warning(self, "完成 (有錯誤)", 
+                                   f"日曆已匯出，但有 {parse_errors} 個事件因格式錯誤而跳過。")
+            else:
+                QMessageBox.information(self, "成功", f"日曆已成功匯出至：\n{save_path}")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "錯誤", f"匯出失敗：\n{e}")
 
 
-if __name__ == '__main__':
-    # 這是啟動 PyQt 應用程式的標準程式碼
-    app = QApplication(sys.argv)
-    window = ScheduleCalendarApp()
-    window.show()
-    sys.exit(app.exec())
+# ---------------- 課表視窗 (無變動) ----------------
+class ScheduleWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("課表檢視")
+        self.resize(700, 400)
+        self.table = QTableWidget(10, 5)
+        self.table.setHorizontalHeaderLabels(["週一", "週二", "週三", "週四", "週五"])
+        self.table.setVerticalHeaderLabels([f"第{i}節" for i in range(1, 11)])
+        layout = QVBoxLayout()
+        layout.addWidget(self.table)
+        self.setLayout(layout)
+        self.load_courses()
+
+    def load_courses(self):
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("SELECT course_name, classroom, weekday, start_period, end_period FROM courses")
+        for name, room, wd, sp, ep in c.fetchall():
+            for p in range(sp, ep + 1):
+                item = QTableWidgetItem(f"{name}\n@{room}")
+                self.table.setItem(p - 1, wd - 1, item)
+        conn.close()
+
+
+if __name__ == "__main__":
+    from PyQt6.QtWidgets import QListWidgetItem
     
+    init_db()
+    app = QApplication(sys.argv)
+    win = CalendarScheduleApp()
+    win.show()
+    sys.exit(app.exec())
