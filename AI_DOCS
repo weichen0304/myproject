@@ -1,0 +1,59 @@
+文件主題：解決 MinGW/MSYS2 環境鎖定 (externally-managed-environment) 導致的 Python 函式庫安裝失敗問題。
+🚨 核心問題分析
+使用者當前環境中的 Python（路徑包含 C:\msys64\...）被系統鎖定，無法使用標準的 pip 指令安裝 PyQt6、ics、pytz 等第三方函式庫。所有 pip 失敗、ModuleNotFoundError 以及虛擬環境啟用失敗，都源於此系統限制。
+
+💡 解決方案：安裝官方 Python 並使用虛擬環境 (venv)
+最穩定、最可靠的方法是完全避開被鎖定的環境，使用一個全新的官方 Python 安裝，並在虛擬環境中進行開發。
+
+步驟一：安裝官方 Python (解決所有問題的根源)
+下載安裝程式： 訪問 Python 官方網站 (https://www.python.org/downloads/)，下載最新的 Windows 安裝程式。
+
+執行安裝： 運行下載的 .exe 檔案。
+
+關鍵設定： 在安裝介面的第一個畫面，務必勾選左下角的選項：
+
+Add python.exe to PATH
+
+完成： 選擇 Install Now。
+
+步驟二：清除舊的 Venv 並導航到專案目錄
+安裝完成後，關閉所有舊的終端機視窗，然後開啟一個新的命令提示字元 (CMD)。
+
+導航： 切換到您的程式碼 (main.py) 所在的目錄 (D:\program(python)\schedule\)。
+
+Bash
+
+cd /d D:\program(python)\schedule\
+清除： 刪除舊的 venv 資料夾，確保環境乾淨。
+
+Bash
+
+rmdir /s /q venv
+創建新的 Venv： 使用新安裝的官方 Python 創建一個新的虛擬環境。
+
+Bash
+
+python -m venv venv
+步驟三：啟用新的虛擬環境 (關鍵步驟)
+在新創建的虛擬環境中，啟用指令將使用標準的 Windows 路徑：
+
+Bash
+
+venv\Scripts\activate
+成功標誌： 如果成功，您的命令提示符前面會出現 (venv) 標誌。
+
+步驟四：安裝所有所需的函式庫
+在 (venv) 環境中（看到 (venv) 標誌時），執行安裝指令：
+
+Bash
+
+(venv) D:\program(python)\schedule> pip install PyQt6 ics pytz
+預期結果： 函式庫將會成功下載並安裝，解決所有 ModuleNotFoundError。
+
+步驟五：運行您的應用程式
+所有函式庫安裝完成後，在 (venv) 環境中 執行您的應用程式：
+
+Bash
+
+(venv) D:\program(python)\schedule> python main.py
+應用程式的圖形介面將會彈出並運行。
